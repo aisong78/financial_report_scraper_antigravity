@@ -3,6 +3,7 @@ import pandas as pd
 import akshare as ak
 import plotly.graph_objects as go
 import sqlite3
+import json
 from datetime import datetime
 from pathlib import Path
 from data_fetcher import DataFetcher
@@ -167,7 +168,82 @@ with st.sidebar:
     if st.button("强制更新数据"):
         fetcher.fetch_a_stock_financials(selected_stock)
         calculator.calculate_indicators(selected_stock)
-        st.success("已更新！")
+        # 清除缓存以重新加载数据
+        if 'df_raw' in st.session_state:
+            del st.session_state.df_raw
+        st.success("已更新！请刷新页面。")
+        st.rerun()
+
+    st.markdown("---")
+    with st.expander("✏️ 修正数据 (Manual Override)"):
+        st.caption("手动修改数据将锁定该记录，防止被自动覆盖。")
+        
+        # 获取当前股票的所有报告期
+        conn = sqlite3.connect(DB_PATH)
+        periods = pd.read_sql(f"SELECT report_period FROM financial_reports_raw WHERE stock_code='{selected_stock}' ORDER BY report_period DESC", conn)['report_period'].tolist()
+        conn.close()
+        
+        edit_period = st.selectbox("选择报告期", periods)
+        
+        # 字段列表
+        edit_fields = {
+            'revenue': '营业收入',
+            'net_income_parent': '归母净利润',
+            'total_assets': '总资产',
+            'total_equity': '股东权益',
+            'gross_profit': '毛利',
+            'net_income': '净利润',
+            'cfo_net': '经营现金流净额',
+            'income_tax_expenses': '所得税费用',
+            'current_assets': '流动资产',
+            'non_current_assets': '非流动资产',
+            'intangible_assets': '无形资产',
+            'current_liabilities': '流动负债',
+            'non_current_liabilities': '非流动负债',
+            'share_capital': '股本',
+            'retained_earnings': '未分配利润',
+            'net_cash_flow': '现金净增加额'
+        }
+        edit_field_key = st.selectbox("选择字段", list(edit_fields.keys()), format_func=lambda x: f"{edit_fields[x]} ({x})")
+        
+        # 获取当前值
+        current_val = 0.0
+        if edit_period:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT {edit_field_key} FROM financial_reports_raw WHERE stock_code=? AND report_period=?", (selected_stock, edit_period))
+            row = cursor.fetchone()
+            if row and row[0] is not None:
+                current_val = float(row[0])
+            conn.close()
+            
+        new_val = st.number_input("新值 (单位: 元)", value=current_val, format="%.2f")
+        st.caption(f"当前值: {current_val/1e8:.2f} 亿")
+        
+        if st.button("保存并锁定"):
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                # 更新数据并锁定
+                cursor.execute(f'''
+                    UPDATE financial_reports_raw 
+                    SET {edit_field_key} = ?, is_locked = 1, data_quality = 'MANUAL'
+                    WHERE stock_code = ? AND report_period = ?
+                ''', (new_val, selected_stock, edit_period))
+                conn.commit()
+                conn.close()
+                
+                # 重新计算指标
+                calculator.calculate_indicators(selected_stock)
+                
+                # 清除缓存
+                if 'df_raw' in st.session_state:
+                    del st.session_state.df_raw
+                
+                st.success(f"已更新 {edit_period} 的 {edit_fields[edit_field_key]}！")
+                st.rerun()
+            except Exception as e:
+                st.error(f"更新失败: {e}")
 
 # 主界面
 st.title(f"📊 {selected_stock} 财务数据全景")
@@ -277,10 +353,81 @@ if not st.session_state.df_raw.empty:
         with col3:
             st.metric("❌ 数据冲突", conflict_count)
         
+        # 详细验证状态（可展开）
+        with st.expander("📋 查看详细验证状态"):
+            # 按报告期分组显示
+            # 确保 validation_details 存在
+            cols_to_use = ['report_period', 'report_type', 'data_quality']
+            if 'validation_details' in df_raw.columns:
+                cols_to_use.append('validation_details')
+                
+            quality_details = df_raw[cols_to_use].copy()
+            quality_details['report_name'] = quality_details.apply(
+                lambda row: f"{row['report_period'][:4]}{row['report_type']}", axis=1
+            )
+            
+            # 显示已验证的
+            if verified_count > 0:
+                st.markdown("**✅ 已验证的报告：**")
+                verified = quality_details[quality_details['data_quality'] == 'VERIFIED']
+                st.write(", ".join(verified['report_name'].tolist()))
+            
+            # 显示有冲突的
+            if conflict_count > 0:
+                st.markdown("**❌ 数据冲突的报告：**")
+                conflicts = quality_details[quality_details['data_quality'] == 'CONFLICT']
+                
+                for _, row in conflicts.iterrows():
+                    st.markdown(f"**{row['report_name']}**")
+                    
+                    # 解析 validation_details JSON
+                    if 'validation_details' in row and row['validation_details']:
+                        try:
+                            details = json.loads(row['validation_details'])
+                            # 只显示冲突的字段
+                            conflict_fields = {k: v for k, v in details.items() if v.get('status') == 'CONFLICT'}
+                            
+                            if conflict_fields:
+                                for field, info in conflict_fields.items():
+                                    field_name_map = {
+                                        'revenue': ('营业收入', '利润表'),
+                                        'net_income_parent': ('归母净利润', '利润表'),
+                                        'total_assets': ('总资产', '资产负债表'),
+                                        'total_equity': ('股东权益', '资产负债表')
+                                    }
+                                    field_info = field_name_map.get(field, (field, '未知表'))
+                                    field_cn = field_info[0]
+                                    table_name = field_info[1]
+                                    
+                                    st.warning(
+                                        f"⚠️ **{field_cn}** ({table_name}): "
+                                        f"AkShare={info['akshare']}亿, "
+                                        f"PDF={info['pdf']}亿, "
+                                        f"差异={info['diff_pct']}%"
+                                    )
+                            else:
+                                st.caption("（详情缺失，请重新验证）")
+                        except Exception as e:
+                            st.caption(f"（解析详情失败: {e}）")
+                    else:
+                        st.caption("（无详细信息）")
+            
+            # 显示未验证的（只显示前10个，避免太长）
+            if unverified_count > 0:
+                st.markdown(f"**⚠️ 未验证的报告（共{unverified_count}个）：**")
+                unverified = quality_details[quality_details['data_quality'] == 'UNVERIFIED']
+                unverified_list = unverified['report_name'].tolist()
+                if len(unverified_list) > 10:
+                    st.write(", ".join(unverified_list[:10]) + f" ...等{len(unverified_list)}个")
+                else:
+                    st.write(", ".join(unverified_list))
+                
+                st.caption("💡 提示：未验证的数据缺少对应的PDF文件，需要先下载财报原文才能验证。")
+        
         st.markdown("---")
     
     # --- 4. 辅助函数：转置表格 ---
-    def transpose_df(df, index_col='report_name', exclude_cols=['id', 'stock_code', 'currency', 'publish_date', 'report_period', 'report_type', 'report_period_dt', 'data_quality']):
+    def transpose_df(df, index_col='report_name', exclude_cols=['id', 'stock_code', 'currency', 'publish_date', 'report_period', 'report_type', 'report_period_dt', 'data_quality', 'validation_details', 'is_locked']):
         if df.empty: return pd.DataFrame()
         # 确保索引唯一
         df = df.drop_duplicates(subset=[index_col])
@@ -304,17 +451,17 @@ if not st.session_state.df_raw.empty:
         'debt_to_asset': '资产负债率 [%]',
         'current_ratio': '流动比率',
         'inventory_turnover_days': '存货周转天数 [天]',
-        'receivables_turnover_days': '应收账款周转天数 [天]', # 补全
+        'receivables_turnover_days': '应收账款周转天数 [天]',
         'fcf': '自由现金流 (FCF) [亿]',
-        'cfo_to_net_income': '净现比',
-        'dividend_payout_ratio': '分红率 [%]',
-        'dividend_per_share': '每股分红 [元]',
-        'dividend_total': '分红总额 [亿]', # 补全
+        'cfo_to_net_income': '净现比 (CFO/NetIncome)',
+        'dividend_payout_ratio': '分红率 (Payout Ratio) [%]',
+        'dividend_per_share': '每股分红 (DPS) [元]',
+        'dividend_total': '分红总额 [亿]',
         'eps_basic': '基本每股收益 (EPS) [元]',
         'eps_ttm': '滚动每股收益 (EPS-TTM) [元]',
         'bps': '每股净资产 (BPS) [元]',
         
-        # 利润表
+        # 原始报表 - 利润表
         'revenue': '营业收入 [亿]',
         'cost_of_revenue': '营业成本 [亿]',
         'gross_profit': '毛利 [亿]',
@@ -322,6 +469,7 @@ if not st.session_state.df_raw.empty:
         'admin_expenses': '管理费用 [亿]',
         'rd_expenses': '研发费用 [亿]',
         'financial_expenses': '财务费用 [亿]',
+        'income_tax_expenses': '所得税费用 [亿]', # 新增
         'investment_income': '投资收益 [亿]',
         'operating_income': '营业利润 [亿]',
         'total_profit': '利润总额 [亿]',
@@ -331,12 +479,19 @@ if not st.session_state.df_raw.empty:
         
         # 资产负债表
         'total_assets': '总资产 [亿]',
+        'current_assets': '流动资产 [亿]',      # 新增
+        'non_current_assets': '非流动资产 [亿]',  # 新增
         'total_liabilities': '总负债 [亿]',
+        'current_liabilities': '流动负债 [亿]',   # 新增
+        'non_current_liabilities': '非流动负债 [亿]', # 新增
         'total_equity': '股东权益 [亿]',
+        'share_capital': '股本 [亿]',          # 新增
+        'retained_earnings': '未分配利润 [亿]',   # 新增
         'cash_equivalents': '货币资金 [亿]',
         'accounts_receivable': '应收账款 [亿]',
         'inventory': '存货 [亿]',
         'fixed_assets': '固定资产 [亿]',
+        'intangible_assets': '无形资产 [亿]',     # 新增
         'goodwill': '商誉 [亿]',
         'short_term_debt': '短期借款 [亿]',
         'long_term_debt': '长期借款 [亿]',
@@ -347,96 +502,102 @@ if not st.session_state.df_raw.empty:
         'cfo_net': '经营现金流净额 [亿]',
         'cfi_net': '投资现金流净额 [亿]',
         'cff_net': '筹资现金流净额 [亿]',
+        'net_cash_flow': '现金净增加额 [亿]',    # 新增
         'capex': '资本开支 [亿]',
         'cash_paid_for_dividends': '分红支付现金 [亿]'
     }
 
-    # --- 数值格式化函数 ---
-    def format_dataframe(df_transposed):
-        # 这里的 df_transposed 行索引是字段名 (如 'revenue')
+    # --- 6. 高亮样式函数 ---
+    def highlight_conflicts(df_display, df_source):
+        """
+        df_display: 转置后的用于显示的 DataFrame (行是字段，列是报告期)
+        df_source: 原始的 DataFrame (行是报告期，包含 validation_details)
+        """
+        # 创建一个空的样式 DataFrame，默认无样式
+        df_style = pd.DataFrame('', index=df_display.index, columns=df_display.columns)
         
-        def fmt(val, field_name):
-            if val is None: return "-"
-            try:
-                val = float(val)
-            except:
-                return val
-                
-            # 百分比类
-            if any(x in field_name for x in ['margin', 'roe', 'roa', 'yoy', 'ratio', 'percent', 'rate']):
-                if 'current_ratio' in field_name or 'cfo_to_net' in field_name: # 比率不带%
-                    return f"{val:.2f}"
-                return f"{val:.2f}%"
+        # 遍历每一列（即每一个报告期）
+        for col_name in df_display.columns:
+            # 找到对应的源数据行
+            # col_name 可能是 "2023A" 或 "2023A ❌"
+            # 我们需要通过 report_name 找到对应的行
+            source_row = df_source[df_source['report_name'] == col_name]
             
-            # 金额类 (带 [亿] 的)
-            if '[亿]' in field_map.get(field_name, ''):
-                return f"{val/1e8:.2f}"
-            
-            # 天数/每股
-            return f"{val:.2f}"
+            if not source_row.empty:
+                details_json = source_row.iloc[0].get('validation_details')
+                if details_json:
+                    try:
+                        details = json.loads(details_json)
+                        # 找出有冲突的字段
+                        conflict_fields = [k for k, v in details.items() if v.get('status') == 'CONFLICT']
+                        
+                        # 遍历显示表格的每一行（即每一个字段）
+                        for idx in df_display.index:
+                            # idx 是中文显示名，如 "营业收入 [亿]"
+                            # 我们需要反向映射回英文字段名，或者在 field_map 里找
+                            # 简单起见，我们检查 field_map 的 value 是否包含 idx
+                            
+                            original_field = None
+                            for k, v in field_map.items():
+                                if v == idx:
+                                    original_field = k
+                                    break
+                            
+                            if original_field and original_field in conflict_fields:
+                                # 标记冲突：背景淡红，文字红色加粗
+                                df_style.loc[idx, col_name] = 'background-color: #ffe6e6; color: #d9534f; font-weight: bold;'
+                                
+                    except:
+                        pass
+        return df_style
 
-        # 应用格式化
-        # 创建一个新的 DataFrame 用于显示
-        df_display = df_transposed.copy()
-        
-        # 重命名索引 (英文 -> 中文)
-        new_index = [field_map.get(idx, idx) for idx in df_display.index]
-        df_display.index = new_index
-        
-        # 逐个单元格格式化 (效率较低但逻辑简单)
-        # 更好的做法是 applymap，但需要知道原始字段名。
-        # 这里我们在重命名前处理数据
-        
-        for col in df_transposed.columns:
-            for idx in df_transposed.index:
-                raw_val = df_transposed.loc[idx, col]
-                display_val = fmt(raw_val, idx)
-                # 填入新表 (注意新表索引已经变了，所以要用位置或映射)
-                display_idx = field_map.get(idx, idx)
-                df_display.loc[display_idx, col] = display_val
-                
-        return df_display
-
-    # 1. 核心衍生指标 (表二)
-    st.subheader("📈 核心财务指标 (Derived Metrics)")
-    st.caption("基于原始数据计算得出的关键比率和增长率")
+    # --- 7. 数据展示 ---
     
-    if not df_derived.empty:
-        # 明确指定 index_col='report_name'
-        df_t = transpose_df(df_derived, index_col='report_name')
-        st.dataframe(format_dataframe(df_t), use_container_width=True, height=400)
-    else:
-        st.warning("暂无衍生指标数据")
+    # 7.1 核心指标
+    st.subheader("📈 核心财务指标")
+    df_metrics = transpose_df(df_derived)
+    # 映射行名
+    df_metrics.index = df_metrics.index.map(lambda x: field_map.get(x, x))
+    # 格式化 (处理空值)
+    st.dataframe(df_metrics.style.format("{:.2f}", na_rep="-"), height=400)
 
-    # 2. 原始财务报表 (表一)
-    st.markdown("---")
-    st.subheader("📑 原始财务报表 (Financial Statements)")
-    st.caption("从财报中直接提取的原始数据")
+    # 7.2 原始报表 (带高亮)
+    st.subheader("📄 原始财务报表")
     
-    if not df_raw.empty:
-        # 分类展示，避免表格太长
-        tab1, tab2, tab3 = st.tabs(["利润表", "资产负债表", "现金流量表"])
+    tab1, tab2, tab3 = st.tabs(["利润表", "资产负债表", "现金流量表"])
+    
+    # 定义各表的字段
+    income_cols = ['revenue', 'cost_of_revenue', 'gross_profit', 'selling_expenses', 'admin_expenses', 'rd_expenses', 'financial_expenses', 'income_tax_expenses', 'investment_income', 'operating_income', 'total_profit', 'net_income', 'net_income_parent', 'net_income_deducted']
+    balance_cols = ['total_assets', 'current_assets', 'non_current_assets', 'total_liabilities', 'current_liabilities', 'non_current_liabilities', 'total_equity', 'share_capital', 'retained_earnings', 'cash_equivalents', 'accounts_receivable', 'inventory', 'fixed_assets', 'intangible_assets', 'goodwill', 'short_term_debt', 'long_term_debt', 'accounts_payable', 'contract_liabilities']
+    cash_cols = ['cfo_net', 'cfi_net', 'cff_net', 'net_cash_flow', 'capex', 'cash_paid_for_dividends']
+
+    def show_table(cols, df_source):
+        # 筛选存在的列
+        valid_cols = [c for c in cols if c in df_source.columns]
+        # 加上索引列以便转置
+        temp_df = df_source[['report_name'] + valid_cols].copy()
         
-        # 明确指定 index_col='report_name'
-        df_t = transpose_df(df_raw, index_col='report_name')
+        # 数值除以 1亿
+        for c in valid_cols:
+            temp_df[c] = temp_df[c] / 1e8
+            
+        # 转置
+        df_display = transpose_df(temp_df)
+        # 映射行名
+        df_display.index = df_display.index.map(lambda x: field_map.get(x, x))
         
-        # 定义各表包含的字段 (根据 database.py 的定义)
-        income_cols = ['revenue', 'cost_of_revenue', 'gross_profit', 'selling_expenses', 'admin_expenses', 'rd_expenses', 'financial_expenses', 'investment_income', 'operating_income', 'total_profit', 'net_income', 'net_income_parent', 'net_income_deducted']
-        balance_cols = ['total_assets', 'total_liabilities', 'total_equity', 'cash_equivalents', 'accounts_receivable', 'inventory', 'fixed_assets', 'goodwill', 'short_term_debt', 'long_term_debt', 'accounts_payable', 'contract_liabilities']
-        cash_cols = ['cfo_net', 'cfi_net', 'cff_net', 'capex', 'cash_paid_for_dividends']
-        
-        with tab1:
-            valid_cols = [c for c in income_cols if c in df_t.index]
-            st.dataframe(format_dataframe(df_t.loc[valid_cols]), use_container_width=True)
-            
-        with tab2:
-            valid_cols = [c for c in balance_cols if c in df_t.index]
-            st.dataframe(format_dataframe(df_t.loc[valid_cols]), use_container_width=True)
-            
-        with tab3:
-            valid_cols = [c for c in cash_cols if c in df_t.index]
-            st.dataframe(format_dataframe(df_t.loc[valid_cols]), use_container_width=True)
-            
-    else:
-        st.warning("未找到数据。")
+        # 应用样式 (处理空值)
+        st.dataframe(
+            df_display.style
+            .format("{:.2f}", na_rep="-")
+            .apply(lambda x: highlight_conflicts(df_display, df_source), axis=None),
+            height=500
+        )
+
+    with tab1: show_table(income_cols, df_raw)
+    with tab2: show_table(balance_cols, df_raw)
+    with tab3: show_table(cash_cols, df_raw)
+
+else:
+    st.warning("未找到数据。")
 

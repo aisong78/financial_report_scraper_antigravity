@@ -96,9 +96,9 @@ class FinancialDataValidator:
                     'diff_pct': round(diff_ratio * 100, 2)
                 }
         
-        # 5. 更新数据库质量标记
+        # 5. 更新数据库质量标记和详情
         quality_status = 'CONFLICT' if has_conflict else 'VERIFIED'
-        self._update_quality_flag(stock_code, report_period, quality_status)
+        self._update_quality_flag(stock_code, report_period, quality_status, results)
         
         return {
             'status': quality_status,
@@ -122,13 +122,31 @@ class FinancialDataValidator:
 - 归母净利润: {akshare_data.get('net_income_parent', 0) / 1e8:.2f} 亿元
 - 总资产: {akshare_data.get('total_assets', 0) / 1e8:.2f} 亿元
 - 股东权益: {akshare_data.get('total_equity', 0) / 1e8:.2f} 亿元
+- 所得税费用: {akshare_data.get('income_tax_expenses', 0) / 1e8:.2f} 亿元
+- 流动资产: {akshare_data.get('current_assets', 0) / 1e8:.2f} 亿元
+- 非流动资产: {akshare_data.get('non_current_assets', 0) / 1e8:.2f} 亿元
+- 无形资产: {akshare_data.get('intangible_assets', 0) / 1e8:.2f} 亿元
+- 流动负债: {akshare_data.get('current_liabilities', 0) / 1e8:.2f} 亿元
+- 非流动负债: {akshare_data.get('non_current_liabilities', 0) / 1e8:.2f} 亿元
+- 股本: {akshare_data.get('share_capital', 0) / 1e8:.2f} 亿元
+- 未分配利润: {akshare_data.get('retained_earnings', 0) / 1e8:.2f} 亿元
+- 现金流量净额: {akshare_data.get('net_cash_flow', 0) / 1e8:.2f} 亿元
 
 请从财报原文中提取这些数字（合并报表），返回 JSON 格式：
 {{
     "revenue": <营业收入，单位：元>,
     "net_income_parent": <归母净利润，单位：元>,
     "total_assets": <总资产，单位：元>,
-    "total_equity": <股东权益合计，单位：元>
+    "total_equity": <股东权益合计，单位：元>,
+    "income_tax_expenses": <所得税费用，单位：元>,
+    "current_assets": <流动资产合计，单位：元>,
+    "non_current_assets": <非流动资产合计，单位：元>,
+    "intangible_assets": <无形资产，单位：元>,
+    "current_liabilities": <流动负债合计，单位：元>,
+    "non_current_liabilities": <非流动负债合计，单位：元>,
+    "share_capital": <实收资本(或股本)，单位：元>,
+    "retained_earnings": <未分配利润，单位：元>,
+    "net_cash_flow": <现金及现金等价物净增加额，单位：元>
 }}
 
 财报原文（节选）：
@@ -194,7 +212,9 @@ class FinancialDataValidator:
         """从数据库读取 AkShare 数据"""
         cursor = self.conn.cursor()
         cursor.execute('''
-            SELECT revenue, net_income_parent, total_assets, total_equity
+            SELECT revenue, net_income_parent, total_assets, total_equity,
+                   income_tax_expenses, current_assets, non_current_assets, intangible_assets,
+                   current_liabilities, non_current_liabilities, share_capital, retained_earnings, net_cash_flow
             FROM financial_reports_raw
             WHERE stock_code = ? AND report_period = ?
         ''', (stock_code, report_period))
@@ -207,7 +227,16 @@ class FinancialDataValidator:
             'revenue': row[0],
             'net_income_parent': row[1],
             'total_assets': row[2],
-            'total_equity': row[3]
+            'total_equity': row[3],
+            'income_tax_expenses': row[4],
+            'current_assets': row[5],
+            'non_current_assets': row[6],
+            'intangible_assets': row[7],
+            'current_liabilities': row[8],
+            'non_current_liabilities': row[9],
+            'share_capital': row[10],
+            'retained_earnings': row[11],
+            'net_cash_flow': row[12]
         }
     
     def _get_txt_path(self, stock_code, report_period):
@@ -224,14 +253,43 @@ class FinancialDataValidator:
             return str(txt_path)
         return None
     
-    def _update_quality_flag(self, stock_code, report_period, status):
-        """更新数据库中的质量标记"""
+    def _autofill_data(self, stock_code, report_period, data_dict):
+        """回填缺失数据到数据库"""
+        if not data_dict:
+            return
+            
         cursor = self.conn.cursor()
+        
+        # 构建 UPDATE 语句
+        set_clauses = [f"{k} = ?" for k in data_dict.keys()]
+        values = list(data_dict.values())
+        values.extend([stock_code, report_period])
+        
+        sql = f'''
+            UPDATE financial_reports_raw
+            SET {', '.join(set_clauses)}
+            WHERE stock_code = ? AND report_period = ?
+        '''
+        
+        try:
+            cursor.execute(sql, values)
+            self.conn.commit()
+            print(f"  ✅ 已自动回填 {len(data_dict)} 个字段")
+        except Exception as e:
+            print(f"  ⚠️ 回填失败: {e}")
+
+    def _update_quality_flag(self, stock_code, report_period, status, details=None):
+        """更新数据库中的质量标记和详情"""
+        cursor = self.conn.cursor()
+        
+        # 将详情转换为 JSON 字符串
+        details_json = json.dumps(details, ensure_ascii=False) if details else None
+        
         cursor.execute('''
             UPDATE financial_reports_raw
-            SET data_quality = ?
+            SET data_quality = ?, validation_details = ?
             WHERE stock_code = ? AND report_period = ?
-        ''', (status, stock_code, report_period))
+        ''', (status, details_json, stock_code, report_period))
         self.conn.commit()
     
     def close(self):

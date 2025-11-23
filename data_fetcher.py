@@ -157,8 +157,13 @@ class DataFetcher:
             def get_val(df, col_name):
                 if col_name in df.columns:
                     val = df.loc[period, col_name]
+                    if pd.isna(val) or val == '' or val == '--':
+                        return None
                     try:
-                        return float(val) if val else None
+                        # 处理字符串中的逗号
+                        if isinstance(val, str):
+                            val = val.replace(',', '')
+                        return float(val)
                     except:
                         return None
                 return None
@@ -178,36 +183,58 @@ class DataFetcher:
                 'admin_expenses': get_val(df_income, '管理费用'),
                 'rd_expenses': get_val(df_income, '研发费用'),
                 'financial_expenses': get_val(df_income, '财务费用'),
+                'income_tax_expenses': get_val(df_income, '所得税费用'),
                 'investment_income': get_val(df_income, '投资收益'),
+                'operating_income': get_val(df_income, '营业利润'),
+                'total_profit': get_val(df_income, '利润总额'),
                 'net_income': get_val(df_income, '净利润'),
                 'net_income_parent': get_val(df_income, '归属于母公司所有者的净利润'),
-                'net_income_deducted': get_val(df_income, '扣除非经常性损益后的净利润'), # 注意：新浪数据可能有此字段
+                'net_income_deducted': get_val(df_income, '扣除非经常性损益后的净利润'), # 源数据可能缺失
                 
                 # 资产负债表
                 'total_assets': get_val(df_balance, '资产总计'),
+                'current_assets': get_val(df_balance, '流动资产合计'),
+                'non_current_assets': get_val(df_balance, '非流动资产合计'),
                 'total_liabilities': get_val(df_balance, '负债合计'),
+                'current_liabilities': get_val(df_balance, '流动负债合计'),
+                'non_current_liabilities': get_val(df_balance, '非流动负债合计'),
                 'total_equity': get_val(df_balance, '所有者权益(或股东权益)合计'),
+                'share_capital': get_val(df_balance, '实收资本(或股本)'),
+                'retained_earnings': get_val(df_balance, '未分配利润'),
                 'cash_equivalents': get_val(df_balance, '货币资金'),
                 'accounts_receivable': get_val(df_balance, '应收账款'),
                 'inventory': get_val(df_balance, '存货'),
-                'fixed_assets': get_val(df_balance, '固定资产'),
+                'fixed_assets': get_val(df_balance, '固定资产净额') or get_val(df_balance, '固定资产'), # 修正：优先用净额
+                'intangible_assets': get_val(df_balance, '无形资产'),
                 'goodwill': get_val(df_balance, '商誉'),
                 'short_term_debt': get_val(df_balance, '短期借款'),
                 'long_term_debt': get_val(df_balance, '长期借款'),
                 'accounts_payable': get_val(df_balance, '应付账款'),
+                'contract_liabilities': get_val(df_balance, '合同负债') or get_val(df_balance, '预收款项'), # 修正：兼容预收款项
                 
                 # 现金流量表
                 'cfo_net': get_val(df_cash, '经营活动产生的现金流量净额'),
                 'cfi_net': get_val(df_cash, '投资活动产生的现金流量净额'),
                 'cff_net': get_val(df_cash, '筹资活动产生的现金流量净额'),
-                'capex': get_val(df_cash, '购建固定资产、无形资产和其他长期资产支付的现金'),
-                'cash_paid_for_dividends': get_val(df_cash, '分配股利、利润或偿付利息支付的现金')
+                'net_cash_flow': get_val(df_cash, '现金及现金等价物净增加额'),
+                'capex': get_val(df_cash, '购建固定资产、无形资产和其他长期资产所支付的现金'), # 修正：加"所"字
+                'cash_paid_for_dividends': get_val(df_cash, '分配股利、利润或偿付利息所支付的现金') # 修正：加"所"字
             }
             
             # 补全计算字段
             if data['revenue'] and data['cost_of_revenue']:
                 data['gross_profit'] = data['revenue'] - data['cost_of_revenue']
             
+            # 检查是否被锁定
+            cursor.execute(
+                "SELECT is_locked FROM financial_reports_raw WHERE stock_code=? AND report_period=?",
+                (stock_code, report_period_str)
+            )
+            row = cursor.fetchone()
+            if row and row[0] == 1:
+                print(f"  🔒 {report_period_str} 数据已锁定，跳过更新")
+                continue
+
             # 生成 SQL
             columns = ', '.join(data.keys())
             placeholders = ', '.join(['?'] * len(data))
