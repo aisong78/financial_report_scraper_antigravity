@@ -9,6 +9,14 @@ import random
 # 数据库路径
 DB_PATH = Path(__file__).parent / "finance.db"
 
+# 导入验证器
+try:
+    from validator import FinancialDataValidator
+    HAS_VALIDATOR = True
+except ImportError:
+    HAS_VALIDATOR = False
+    print("⚠️ validator.py 未找到，跳过数据验证")
+
 class DataFetcher:
     def __init__(self):
         self.db_path = DB_PATH
@@ -36,12 +44,60 @@ class DataFetcher:
             # 4. 数据清洗与合并
             self._process_and_save(stock_code, df_income, df_balance, df_cash)
             
+            # 5. 数据验证（可选）
+            if HAS_VALIDATOR:
+                print("  🔍 开始数据交叉验证...")
+                self._validate_data(stock_code)
+            
             print(f"✅ {stock_code} 数据抓取完成！")
             return True
             
         except Exception as e:
             print(f"❌ 抓取失败: {e}")
             return False
+    
+    def _validate_data(self, stock_code):
+        """
+        对刚抓取的数据进行交叉验证
+        """
+        try:
+            validator = FinancialDataValidator()
+            
+            # 获取该股票的所有报告期
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT DISTINCT report_period 
+                FROM financial_reports_raw 
+                WHERE stock_code = ?
+                ORDER BY report_period DESC
+                LIMIT 10
+            ''', (stock_code,))
+            
+            periods = [row[0] for row in cursor.fetchall()]
+            conn.close()
+            
+            # 逐个验证
+            verified_count = 0
+            conflict_count = 0
+            
+            for period in periods:
+                result = validator.validate_report(stock_code, period)
+                if result['status'] == 'VERIFIED':
+                    verified_count += 1
+                elif result['status'] == 'CONFLICT':
+                    conflict_count += 1
+                    print(f"    ⚠️ {period} 发现数据冲突")
+                    for field, detail in result['details'].items():
+                        if detail.get('status') == 'CONFLICT':
+                            print(f"       - {field}: AkShare={detail['akshare']}亿, PDF={detail['pdf']}亿, 差异={detail['diff_pct']}%")
+            
+            validator.close()
+            
+            print(f"  ✅ 验证完成: {verified_count} 通过, {conflict_count} 冲突")
+            
+        except Exception as e:
+            print(f"  ⚠️ 验证失败: {e}")
 
     def _process_and_save(self, stock_code, df_income, df_balance, df_cash):
         """

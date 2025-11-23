@@ -261,8 +261,26 @@ if not st.session_state.df_raw.empty:
         if df_raw.empty:
             st.error(f"筛选 '{target_type}' 后数据为空！请检查数据源。")
     
+    # --- 3.5 数据质量统计 ---
+    if 'data_quality' in df_raw.columns:
+        st.markdown("### 📊 数据质量概览")
+        col1, col2, col3 = st.columns(3)
+        
+        verified_count = len(df_raw[df_raw['data_quality'] == 'VERIFIED'])
+        unverified_count = len(df_raw[df_raw['data_quality'] == 'UNVERIFIED'])
+        conflict_count = len(df_raw[df_raw['data_quality'] == 'CONFLICT'])
+        
+        with col1:
+            st.metric("✅ 已验证", verified_count)
+        with col2:
+            st.metric("⚠️ 未验证", unverified_count)
+        with col3:
+            st.metric("❌ 数据冲突", conflict_count)
+        
+        st.markdown("---")
+    
     # --- 4. 辅助函数：转置表格 ---
-    def transpose_df(df, index_col='report_name', exclude_cols=['id', 'stock_code', 'currency', 'publish_date', 'report_period', 'report_type', 'report_period_dt']):
+    def transpose_df(df, index_col='report_name', exclude_cols=['id', 'stock_code', 'currency', 'publish_date', 'report_period', 'report_type', 'report_period_dt', 'data_quality']):
         if df.empty: return pd.DataFrame()
         # 确保索引唯一
         df = df.drop_duplicates(subset=[index_col])
