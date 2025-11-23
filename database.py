@@ -21,6 +21,7 @@ def init_db():
         report_type TEXT NOT NULL,      -- 报告类型 (Q1/S1/Q3/A)
         publish_date TEXT,              -- 财报发布日期
         currency TEXT,                  -- 货币单位 (CNY/USD/HKD)
+        data_quality TEXT DEFAULT 'UNVERIFIED',  -- 数据质量标记 (VERIFIED/UNVERIFIED/CONFLICT)
         
         -- A. 利润表
         revenue REAL,                   -- 营业收入
@@ -102,7 +103,26 @@ def init_db():
     )
     ''')
     
-    # --- 3. 指标字典表 (metric_definitions) ---
+    # --- 4. 财报文件记录表 (financial_reports_files) ---
+    # 记录所有下载的 PDF/HTML 原始文件
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS financial_reports_files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        stock_code TEXT NOT NULL,
+        report_period TEXT NOT NULL,
+        report_type TEXT NOT NULL,
+        file_type TEXT,                 -- 'PDF' 或 'HTML'
+        file_path TEXT,                 -- 相对路径，如 'downloads/688005/2023年年报.pdf'
+        txt_path TEXT,                  -- 解析后的 TXT 路径
+        download_date TEXT,             -- 下载时间
+        file_size INTEGER,              -- 文件大小（字节）
+        parse_status TEXT DEFAULT 'PENDING',  -- 解析状态 (PENDING/SUCCESS/FAILED)
+        
+        UNIQUE(stock_code, report_period, report_type)
+    )
+    ''')
+    
+    # --- 5. 指标字典表 (metric_definitions) ---
     # 存储指标的中文解释
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS metric_definitions (
