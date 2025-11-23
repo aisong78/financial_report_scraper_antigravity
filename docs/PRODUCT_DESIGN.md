@@ -204,8 +204,39 @@ A: 记录文件路径的好处：
 
 **设计思路**:
 - 先用 PDF 解析提取关键段落（如 MD&A 章节）
+```
 - 再把精简后的文本喂给 LLM
 - 缓存 LLM 回答，避免重复调用
+
+---
+
+## v2.0 架构规划：多市场支持 (Multi-Market Architecture)
+
+为了支持港股 (HK) 和美股 (US) 数据，同时保持代码整洁，我们将采用**模块化架构**。
+
+### 1. 代码结构重构 (Code Separation)
+采用**策略模式 (Strategy Pattern)** 分离不同市场的抓取逻辑：
+```text
+/fetchers
+    ├── __init__.py
+    ├── base_fetcher.py    # 定义通用接口 (fetch, process, save)
+    ├── a_share.py         # A股逻辑 (迁移现有 data_fetcher.py)
+    ├── hk_share.py        # 港股逻辑 (新接口 + 繁体中文映射)
+    └── us_share.py        # 美股逻辑 (新接口 + 英文映射)
+```
+*   **主程序 (`app.py`)**：根据股票代码自动识别市场（如 `01810` -> HK, `AAPL` -> US），调用对应的 Fetcher。
+
+### 2. 数据库策略 (Unified Database)
+保持单一数据库 `finance.db`，但在表中增加区分字段：
+*   **`financial_reports_raw`**:
+    *   新增 `market` 字段 (VALUES: 'CN', 'HK', 'US')。
+    *   新增 `currency` 字段 (VALUES: 'CNY', 'HKD', 'USD')。
+    *   核心字段（营收、净利、总资产）保持通用。
+    *   特有字段（如美股的 Stock-based Compensation）可作为 JSON 存入 `extra_data` 列，或新增专用列。
+
+### 3. 用户体验 (Unified UX)
+*   **统一入口**: 搜索框自动识别代码格式。
+*   **自适应展示**: 根据市场类型，动态调整展示的指标（例如美股不显示"扣非净利润"，而是显示 "Non-GAAP Net Income"）。
 
 ---
 

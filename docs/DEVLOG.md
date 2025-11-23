@@ -344,6 +344,7 @@ st.session_state.df_raw = df
 - **Fix**: 修复了 `data_fetcher.py` 中多个字段映射错误（如固定资产净额、资本开支、分红现金流），并增加了对 `None` 值的健壮性处理（处理逗号分隔符）。
 - **Database**: 扩展了 `financial_reports_raw` 表，新增了 9 个关键字段（所得税、流动资产/负债、无形资产、股本等）。
 - **Refactor**: 优化了 `batch_validate.py`，支持强制重新验证以触发自动回填。
+- **Architecture**: 确定了 v2.0 多市场支持的架构方案（Fetcher 分离，DB 统一），已写入 PRODUCT_DESIGN.md。
 
 ## 2025-11-21: 初始化项目
 (周四) - 需求调研
