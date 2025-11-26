@@ -35,55 +35,48 @@ class FinancialCalculator:
         indicators['report_period'] = df.index.strftime('%Y-%m-%d') # 转回字符串存库
         
         # --- A. 盈利能力 ---
-        # 毛利率 = 毛利 / 营业收入 * 100
-        indicators['gross_margin'] = df.apply(lambda x: (x['gross_profit'] / x['revenue'] * 100) if x['revenue'] else None, axis=1)
+        # 辅助函数：安全除法
+        def safe_div(a, b):
+            if pd.isna(a) or pd.isna(b) or b == 0:
+                return None
+            return a / b
+
+        # 2. 计算衍生指标
+        # 盈利能力
+        indicators['gross_margin'] = df.apply(lambda x: safe_div(x['gross_profit'], x['revenue']) * 100 if safe_div(x['gross_profit'], x['revenue']) is not None else None, axis=1)
+        indicators['net_margin'] = df.apply(lambda x: safe_div(x['net_income'], x['revenue']) * 100 if safe_div(x['net_income'], x['revenue']) is not None else None, axis=1)
+        indicators['roe'] = df.apply(lambda x: safe_div(x['net_income_parent'], x['total_equity']) * 100 if safe_div(x['net_income_parent'], x['total_equity']) is not None else None, axis=1)
+        indicators['roa'] = df.apply(lambda x: safe_div(x['net_income'], x['total_assets']) * 100 if safe_div(x['net_income'], x['total_assets']) is not None else None, axis=1)
         
-        # 净利率 = 净利润 / 营业收入 * 100
-        indicators['net_margin'] = df.apply(lambda x: (x['net_income'] / x['revenue'] * 100) if x['revenue'] else None, axis=1)
+        # 成长能力 (YoY)
+        # 成长能力 (YoY)
+        # 数据是正序排列的 (2022, 2023, ...)，所以比较上一行 (去年)
+        # 假设主要是年度数据，所以 periods=1
+        indicators['revenue_yoy'] = df['revenue'].pct_change(periods=1) * 100
+        indicators['net_profit_yoy'] = df['net_income_parent'].pct_change(periods=1) * 100
         
-        # ROE = 净利润 / 归母股东权益 * 100 (简化版：使用期末权益，严格版应用平均权益)
-        indicators['roe'] = df.apply(lambda x: (x['net_income_parent'] / x['total_equity'] * 100) if x['total_equity'] else None, axis=1)
+        # 偿债能力
+        indicators['debt_to_asset'] = df.apply(lambda x: safe_div(x['total_liabilities'], x['total_assets']) * 100 if safe_div(x['total_liabilities'], x['total_assets']) is not None else None, axis=1)
+        # 流动比率 = 流动资产 / 流动负债
+        indicators['current_ratio'] = df.apply(lambda x: safe_div(x['current_assets'], x['current_liabilities']) if safe_div(x['current_assets'], x['current_liabilities']) is not None else None, axis=1)
         
-        # ROA = 净利润 / 总资产 * 100
-        indicators['roa'] = df.apply(lambda x: (x['net_income'] / x['total_assets'] * 100) if x['total_assets'] else None, axis=1)
+        # 运营能力
+        # 存货周转天数 = 365 * 存货 / 营业成本
+        indicators['inventory_turnover_days'] = df.apply(lambda x: safe_div(365 * x['inventory'], x['cost_of_revenue']) if pd.notna(x['inventory']) else None, axis=1)
+        # 应收账款周转天数 = 365 * 应收账款 / 营业收入
+        indicators['receivables_turnover_days'] = df.apply(lambda x: safe_div(365 * x['accounts_receivable'], x['revenue']) if pd.notna(x['accounts_receivable']) else None, axis=1)
         
-        # --- B. 偿债与运营 ---
-        # 资产负债率 = 总负债 / 总资产 * 100
-        indicators['debt_to_asset'] = df.apply(lambda x: (x['total_liabilities'] / x['total_assets'] * 100) if x['total_assets'] else None, axis=1)
-        
-        # 流动比率 = 流动资产 / 流动负债 (注意：数据库中需要确保有这两个字段，如果没有则为 None)
-        # 我们的 raw 表里暂时没抓流动资产/负债合计，这里先留空或用近似值
-        indicators['current_ratio'] = None 
-        
-        # 存货周转天数 = 365 / (营业成本 / 平均存货)
-        # 简化版：365 * 存货 / 营业成本
-        indicators['inventory_turnover_days'] = df.apply(lambda x: (365 * x['inventory'] / x['cost_of_revenue']) if x['cost_of_revenue'] else None, axis=1)
-        
-        # --- C. 现金流 ---
+        # 现金流
         # 自由现金流 FCF = 经营现金流净额 - 资本开支
-        # 注意：资本开支通常是负数（流出），如果数据库存的是正数代表流出，则用减法；如果是负数则用加法。
-        # AkShare 返回的 '购建固定资产...' 通常是正数。
+        # 注意：如果 capex 是 None，结果也是 None，这是 pandas 的特性，不会报错
         indicators['fcf'] = df['cfo_net'] - df['capex']
         
         # 净现比 = 经营现金流净额 / 净利润
-        indicators['cfo_to_net_income'] = df.apply(lambda x: (x['cfo_net'] / x['net_income']) if x['net_income'] else None, axis=1)
+        indicators['cfo_to_net_income'] = df.apply(lambda x: safe_div(x['cfo_net'], x['net_income']) if safe_div(x['cfo_net'], x['net_income']) is not None else None, axis=1)
         
         # --- D. 成长能力 (YoY) ---
-        # 需要找到去年同期的数据。
-        # 简单做法：shift(4) 假设每年4个季度。但如果数据缺失就不准。
-        # 精确做法：用 resample 或 merge。这里用 merge self。
-        
-        df_last_year = df.copy()
-        df_last_year.index = df_last_year.index + pd.DateOffset(years=1) # 把去年的时间推到今年，方便对齐
-        
-        # 合并
-        merged = pd.merge(df, df_last_year, left_index=True, right_index=True, suffixes=('', '_last'), how='left')
-        
-        # 营收增长率
-        indicators['revenue_yoy'] = (merged['revenue'] - merged['revenue_last']) / merged['revenue_last'].abs() * 100
-        
-        # 净利增长率
-        indicators['net_profit_yoy'] = (merged['net_income_parent'] - merged['net_income_parent_last']) / merged['net_income_parent_last'].abs() * 100
+        # 已在上方通过 pct_change 计算，此处移除重复且易报错的 merge 逻辑
+
         
         # --- E. TTM 数据 (滚动12个月) ---
         # 仅针对季报/半年报计算。年报 TTM = 年报本身。

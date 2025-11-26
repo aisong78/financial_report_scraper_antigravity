@@ -6,15 +6,22 @@ import sqlite3
 import json
 from datetime import datetime
 from pathlib import Path
-from data_fetcher import DataFetcher
+from fetchers.a_share import AShareFetcher
+from fetchers.hk_share import HKShareFetcher
 from calculator import FinancialCalculator
 
 # 数据库路径
 DB_PATH = Path(__file__).parent / "finance.db"
 
 # 初始化工具
-fetcher = DataFetcher()
+# 初始化工具
+# fetcher = AShareFetcher() (已移除全局实例)
 calculator = FinancialCalculator()
+
+def get_fetcher(stock_code):
+    if len(stock_code) == 5 and stock_code.isdigit():
+        return HKShareFetcher()
+    return AShareFetcher()
 
 # 设置页面配置
 st.set_page_config(
@@ -34,7 +41,8 @@ def get_stock_data(stock_code):
     
     if df.empty:
         st.info(f"本地无 {stock_code} 数据，正在从云端抓取 (2010-2024)...")
-        success = fetcher.fetch_a_stock_financials(stock_code)
+        fetcher = get_fetcher(stock_code)
+        success = fetcher.fetch_financial_data(stock_code)
         if success:
             calculator.calculate_indicators(stock_code)
             # 重新读取
@@ -151,22 +159,32 @@ def analyze_gap(metrics, framework_type="value"):
 # 侧边栏
 with st.sidebar:
     st.title("🚀 控制台")
-    if 'watchlist' not in st.session_state:
-        st.session_state.watchlist = ['600519', '688005', '000858']
     
-    new_stock = st.text_input("添加股票代码", placeholder="如 00700")
-    if st.button("添加"):
-        if new_stock and new_stock not in st.session_state.watchlist:
-            st.session_state.watchlist.append(new_stock)
-            
-    selected_stock = st.radio("选择股票", st.session_state.watchlist)
+    # 简单直接的股票代码输入
+    if 'stock_code' not in st.session_state:
+        st.session_state['stock_code'] = '01810' # 默认小米
+
+    def update_code():
+        st.session_state['stock_code'] = st.session_state.code_input
+
+    selected_stock = st.text_input(
+        "输入股票代码", 
+        value=st.session_state['stock_code'],
+        key='code_input',
+        on_change=update_code,
+        help="输入代码后回车，如 01810, 600519"
+    )
+    
+    # 确保同步
+    st.session_state['stock_code'] = selected_stock
     
     st.markdown("---")
     st.subheader("数据筛选")
     report_type = st.selectbox("报告类型", ["全部", "年报 (A)", "三季报 (Q3)", "半年报 (S1)", "一季报 (Q1)"], index=0)
     
     if st.button("强制更新数据"):
-        fetcher.fetch_a_stock_financials(selected_stock)
+        fetcher = get_fetcher(selected_stock)
+        fetcher.fetch_financial_data(selected_stock)
         calculator.calculate_indicators(selected_stock)
         # 清除缓存以重新加载数据
         if 'df_raw' in st.session_state:
@@ -272,7 +290,8 @@ if st.button("加载/刷新数据", type="primary"):
         
         if check_df.empty:
             st.info("本地无数据，正在云端抓取...")
-            fetcher.fetch_a_stock_financials(selected_stock)
+            fetcher = get_fetcher(selected_stock)
+            fetcher.fetch_financial_data(selected_stock)
             calculator.calculate_indicators(selected_stock)
             
         raw, derived = get_all_history(selected_stock)
@@ -561,43 +580,96 @@ if not st.session_state.df_raw.empty:
     # 格式化 (处理空值)
     st.dataframe(df_metrics.style.format("{:.2f}", na_rep="-"), height=400)
 
-    # 7.2 原始报表 (带高亮)
-    st.subheader("📄 原始财务报表")
+    # 7.2 原始财务报表 (全量数据)
+    st.subheader("📄 原始财务报表 (Raw Data)")
     
-    tab1, tab2, tab3 = st.tabs(["利润表", "资产负债表", "现金流量表"])
-    
-    # 定义各表的字段
-    income_cols = ['revenue', 'cost_of_revenue', 'gross_profit', 'selling_expenses', 'admin_expenses', 'rd_expenses', 'financial_expenses', 'income_tax_expenses', 'investment_income', 'operating_income', 'total_profit', 'net_income', 'net_income_parent', 'net_income_deducted']
-    balance_cols = ['total_assets', 'current_assets', 'non_current_assets', 'total_liabilities', 'current_liabilities', 'non_current_liabilities', 'total_equity', 'share_capital', 'retained_earnings', 'cash_equivalents', 'accounts_receivable', 'inventory', 'fixed_assets', 'intangible_assets', 'goodwill', 'short_term_debt', 'long_term_debt', 'accounts_payable', 'contract_liabilities']
-    cash_cols = ['cfo_net', 'cfi_net', 'cff_net', 'net_cash_flow', 'capex', 'cash_paid_for_dividends']
+    # 定义映射字典 (用于在 UI 上标注核心变量)
+    # 注意：这里只是为了显示，实际逻辑在 Fetcher 里
+    # 我们做一个简单的反向查找： 原始中文 -> 内部英文
+    hk_mapping_display = {}
+    # 搬运自 hk_share.py 的映射逻辑
+    raw_map = {
+        'revenue': ['营业额', '营业收入', '营业总收入', '收入'],
+        'gross_profit': ['毛利'],
+        'net_income_parent': ['本公司拥有人应占溢利', '归属于母公司股东的净利润', '归母净利润'],
+        'net_income': ['年度溢利', '净利润'],
+        'eps_basic': ['基本每股盈利', '基本每股收益'],
+        'rd_expenses': ['研究及开发成本', '研发费用'],
+        'total_assets': ['资产总值', '资产合计', '总资产'],
+        'total_liabilities': ['负债总额', '负债合计', '总负债'],
+        'total_equity': ['本公司拥有人应占权益', '权益合计', '股东权益合计'],
+        'cash_equivalents': ['现金及现金等价物', '货币资金'],
+        'cfo_net': ['经营业务现金净额', '经营活动产生的现金流量净额'],
+        'capex': ['购建固定资产', '购买物业、厂房及设备']
+    }
+    for internal_key, raw_list in raw_map.items():
+        for raw_name in raw_list:
+            hk_mapping_display[raw_name] = internal_key
 
-    def show_table(cols, df_source):
-        # 筛选存在的列
-        valid_cols = [c for c in cols if c in df_source.columns]
-        # 加上索引列以便转置
-        temp_df = df_source[['report_name'] + valid_cols].copy()
+    if 'raw_data' in df_raw.columns and not df_raw['raw_data'].isna().all():
+        # 解析所有行的 JSON
+        all_rows = []
+        for idx, row in df_raw.iterrows():
+            if row['raw_data']:
+                try:
+                    row_dict = json.loads(row['raw_data'])
+                    # 加上报告期作为第一列
+                    row_dict['report_period'] = row['report_period']
+                    all_rows.append(row_dict)
+                except:
+                    pass
         
-        # 数值除以 1亿
-        for c in valid_cols:
-            temp_df[c] = temp_df[c] / 1e8
+        if all_rows:
+            df_full = pd.DataFrame(all_rows)
+            # 把 report_period 设为索引
+            if 'report_period' in df_full.columns:
+                df_full.set_index('report_period', inplace=True)
             
-        # 转置
-        df_display = transpose_df(temp_df)
-        # 映射行名
-        df_display.index = df_display.index.map(lambda x: field_map.get(x, x))
-        
-        # 应用样式 (处理空值)
-        st.dataframe(
-            df_display.style
-            .format("{:.2f}", na_rep="-")
-            .apply(lambda x: highlight_conflicts(df_display, df_source), axis=None),
-            height=500
-        )
+            # --- 控制选项 ---
+            col1, col2 = st.columns(2)
+            with col1:
+                unit_opt = st.radio("单位", ["原始值 (元)", "亿"], horizontal=True, key="full_data_unit")
+            with col2:
+                transpose_opt = st.checkbox("转置表格 (时间横轴)", value=True, key="full_data_transpose")
+            
+            # --- 数据处理 ---
+            # 1. 单位转换
+            if unit_opt == "亿":
+                for col in df_full.columns:
+                    df_full[col] = pd.to_numeric(df_full[col], errors='ignore')
+                    if pd.api.types.is_numeric_dtype(df_full[col]):
+                        if df_full[col].abs().median() > 10000:
+                            df_full[col] = df_full[col] / 1e8
+            
+            # 2. 转置
+            if transpose_opt:
+                df_display = df_full.T
+                # 在转置后的索引(字段名)上添加标注
+                new_index = []
+                for idx in df_display.index:
+                    internal_name = hk_mapping_display.get(idx)
+                    if internal_name:
+                        new_index.append(f"{idx} ({internal_name})")
+                    else:
+                        new_index.append(idx)
+                df_display.index = new_index
+            else:
+                df_display = df_full
+                # 如果不转置，列名添加标注
+                new_cols = []
+                for col in df_display.columns:
+                    internal_name = hk_mapping_display.get(col)
+                    if internal_name:
+                        new_cols.append(f"{col} ({internal_name})")
+                    else:
+                        new_cols.append(col)
+                df_display.columns = new_cols
 
-    with tab1: show_table(income_cols, df_raw)
-    with tab2: show_table(balance_cols, df_raw)
-    with tab3: show_table(cash_cols, df_raw)
+            # 展示
+            st.dataframe(df_display, height=600)
+            st.caption(f"共包含 {len(df_full.columns)} 个原始字段。括号内为系统识别的核心变量名。")
+    else:
+        st.info("暂无原始数据，请点击侧边栏'强制更新数据'。")
 
 else:
     st.warning("未找到数据。")
-
