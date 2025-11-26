@@ -591,14 +591,14 @@ if not st.session_state.df_raw.empty:
     raw_map = {
         'revenue': ['营业额', '营业收入', '营业总收入', '收入'],
         'gross_profit': ['毛利'],
-        'net_income_parent': ['本公司拥有人应占溢利', '归属于母公司股东的净利润', '归母净利润'],
-        'net_income': ['年度溢利', '净利润'],
+        'net_income_parent': ['本公司拥有人应占溢利', '归属于母公司股东的净利润', '归母净利润', '股东应占溢利'],
+        'net_income': ['年度溢利', '净利润', '除税后溢利'],
         'eps_basic': ['基本每股盈利', '基本每股收益'],
         'rd_expenses': ['研究及开发成本', '研发费用'],
         'total_assets': ['资产总值', '资产合计', '总资产'],
         'total_liabilities': ['负债总额', '负债合计', '总负债'],
-        'total_equity': ['本公司拥有人应占权益', '权益合计', '股东权益合计'],
-        'cash_equivalents': ['现金及现金等价物', '货币资金'],
+        'total_equity': ['本公司拥有人应占权益', '权益合计', '股东权益合计', '股东权益'],
+        'cash_equivalents': ['现金及现金等价物', '货币资金', '银行结余及现金'],
         'cfo_net': ['经营业务现金净额', '经营活动产生的现金流量净额'],
         'capex': ['购建固定资产', '购买物业、厂房及设备']
     }
@@ -619,10 +619,26 @@ if not st.session_state.df_raw.empty:
                 except:
                     pass
         
+        # 辅助函数：格式化报告期
+        def format_period(date_str):
+            try:
+                dt = pd.to_datetime(date_str)
+                year = dt.year
+                month = dt.month
+                if month == 12: return f"{year}A"
+                elif month == 6: return f"{year}S"
+                elif month == 3: return f"{year}Q1"
+                elif month == 9: return f"{year}Q3"
+                else: return date_str # 其他奇怪的日期保持原样
+            except:
+                return date_str
+
         if all_rows:
             df_full = pd.DataFrame(all_rows)
-            # 把 report_period 设为索引
+            
+            # 格式化 report_period 列
             if 'report_period' in df_full.columns:
+                df_full['report_period'] = df_full['report_period'].apply(format_period)
                 df_full.set_index('report_period', inplace=True)
             
             # --- 控制选项 ---
@@ -633,41 +649,110 @@ if not st.session_state.df_raw.empty:
                 transpose_opt = st.checkbox("转置表格 (时间横轴)", value=True, key="full_data_transpose")
             
             # --- 数据处理 ---
-            # 1. 单位转换
+            # 1. 单位转换 (基于规则的硬编码模式)
+            # 规则：默认都转为亿，除非字段名包含特定关键词 (如 '每股', '率')
+            converted_cols = set()
+            exclude_keywords = ['每股', '率', '日数', '次数', 'Year', 'Date', '日期']
+            
             if unit_opt == "亿":
                 for col in df_full.columns:
+                    # 尝试转为数字
                     df_full[col] = pd.to_numeric(df_full[col], errors='ignore')
+                    
                     if pd.api.types.is_numeric_dtype(df_full[col]):
-                        if df_full[col].abs().median() > 10000:
+                        # 检查是否在黑名单里
+                        is_excluded = any(k in str(col) for k in exclude_keywords)
+                        
+                        if not is_excluded:
+                            # 确认为金额字段，执行转换
                             df_full[col] = df_full[col] / 1e8
+                            converted_cols.add(col)
             
             # 2. 转置
             if transpose_opt:
                 df_display = df_full.T
-                # 在转置后的索引(字段名)上添加标注
-                new_index = []
+                
+                # 新增一列：系统内部变量名
+                system_vars = []
+                new_index = [] # 用于存储带单位的新索引名
+                
                 for idx in df_display.index:
-                    internal_name = hk_mapping_display.get(idx)
-                    if internal_name:
-                        new_index.append(f"{idx} ({internal_name})")
+                    clean_idx = str(idx).strip()
+                    internal_name = hk_mapping_display.get(clean_idx, "")
+                    system_vars.append(internal_name)
+                    
+                    # 如果该字段被转换了单位，加后缀
+                    if idx in converted_cols:
+                        new_index.append(f"{idx} (亿)")
                     else:
                         new_index.append(idx)
+                
+                # 更新索引名
                 df_display.index = new_index
+                
+                # 插入到第一列
+                df_display.insert(0, "System Variable", system_vars)
+                
+                # 重命名索引列名为 "AkShare Field"
+                df_display.index.name = "AkShare Field"
+                
+                # --- 行级操作 (Row Operations) ---
+                st.caption("🛠️ 行操作")
+                r_col1, r_col2 = st.columns([1, 2])
+                with r_col1:
+                    search_query = st.text_input("🔍 搜索字段", placeholder="输入关键词过滤...", key="row_search")
+                with r_col2:
+                    pinned_fields = st.multiselect("📌 置顶字段 (Pin)", options=df_display.index, key="row_pin")
+                
+                # 1. 筛选 (Filter)
+                if search_query:
+                    # 模糊匹配索引
+                    df_display = df_display[df_display.index.str.contains(search_query, case=False)]
+                
+                # 2. 置顶 (Pinning)
+                if pinned_fields:
+                    # 找出在当前显示列表中存在的置顶字段
+                    valid_pins = [f for f in pinned_fields if f in df_display.index]
+                    if valid_pins:
+                        pinned_df = df_display.loc[valid_pins]
+                        unpinned_df = df_display.drop(valid_pins)
+                        df_display = pd.concat([pinned_df, unpinned_df])
+                
             else:
                 df_display = df_full
-                # 如果不转置，列名添加标注
-                new_cols = []
-                for col in df_display.columns:
-                    internal_name = hk_mapping_display.get(col)
-                    if internal_name:
-                        new_cols.append(f"{col} ({internal_name})")
-                    else:
-                        new_cols.append(col)
-                df_display.columns = new_cols
+                pass
+
+            # --- 样式应用 ---
+            # 定义负值红字样式函数
+            def highlight_negative(val):
+                color = 'red' if isinstance(val, (int, float)) and val < 0 else ''
+                return f'color: {color}'
 
             # 展示
-            st.dataframe(df_display, height=600)
-            st.caption(f"共包含 {len(df_full.columns)} 个原始字段。括号内为系统识别的核心变量名。")
+            try:
+                # 组合样式：负值红字 + 2位小数
+                styler = df_display.style.map(highlight_negative)
+                
+                # 定义强力格式化函数
+                def format_float(val):
+                    if isinstance(val, (int, float)):
+                        return "{:,.2f}".format(val) # 增加千分位分隔符，更易读
+                    return val
+
+                # 排除 'System Variable' 列进行格式化
+                data_cols = [c for c in df_display.columns if c != 'System Variable']
+                styler = styler.format(format_float, subset=data_cols)
+                
+                st.dataframe(styler, height=600)
+                
+                st.info("💡 说明：AkShare 源数据未提供特定单位字段，默认通常为原始币种（元）。上表已根据您的设置进行了单位转换（如转为亿）。")
+                
+            except Exception as e:
+                # 降级处理
+                st.warning(f"样式渲染出错: {e}")
+                st.dataframe(df_display, height=600)
+                
+            st.caption(f"共包含 {len(df_full.columns)} 个原始字段。'System Variable' 列显示了系统识别的核心变量名。")
     else:
         st.info("暂无原始数据，请点击侧边栏'强制更新数据'。")
 
